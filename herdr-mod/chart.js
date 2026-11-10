@@ -187,16 +187,28 @@ export function windowChart(l, points, r, now, t, color, hover) {
   const Y = v => 100 - clamp(v, 0, 100);
   const pts = points.filter(p => p.t >= r.from - 60 && p.t <= r.to).map(p => ({ ...p }));
   // The latest value known (it may come from ai-usage) closes the series at now.
+  // The latest value known (from Langfuse or ai-usage) is a reading too, at the time it was read.
   if (l.utilization != null && r.until > r.from) {
-    const last = pts.at(-1);
-    if (!last || (l.utilization >= last.v && r.until > last.t)) pts.push({ t: r.until, v: l.utilization });
+    const last = pts.at(-1), at = clamp(l.at ?? r.until, r.from, r.until);
+    if (!last || l.utilization > last.v || (l.utilization === last.v && at > last.t)) {
+      pts.push({ t: Math.max(at, last?.t ?? at), v: Math.max(l.utilization, last?.v ?? 0) });
+    }
   }
   // One point per x: readings in the same minute collapse to their highest.
   const xy = [];
   for (const p of pts) {
     const x = X(p.t), y = Y(p.v), prev = xy.at(-1);
     if (prev && x - prev[0] < 0.05) prev[1] = Math.min(prev[1], y);
-    else xy.push([x, y]);
+    else xy.push([x, y, p.t]);
+  }
+  // Readings further apart than this left a stretch unknown (no pi talking to the provider, or
+  // a pi without rate-limit scores): drawn straight and dashed, not as a made-up curve.
+  const gap = span <= 6 * HOUR ? 20 * 60 : 3 * HOUR;
+  const runs = [];
+  for (const p of xy) {
+    const run = runs.at(-1);
+    if (run && p[2] - run.at(-1)[2] <= gap) run.push(p);
+    else runs.push([p]);
   }
 
   const root = track(frame(t, tickXs(r)), r, span <= 6 * HOUR ? 60 : 900, hover);
@@ -211,34 +223,55 @@ export function windowChart(l, points, r, now, t, color, hover) {
         Background.pattern_slash(alpha(color, 0.22), 1, 5)));
       root.child(paint(dashed(PathBuilder.stroke(1), 0, 100, fx, fy, 0.9, 0.9), alpha(color, 0.5)));
     }
-    const lx = xy.at(-1)[0], ly = xy.at(-1)[1];
+    const [lx, ly, lt] = xy.at(-1);
+    // Since the last reading the value is at least that: flat on to now.
+    const nx = now < r.to && r.until > lt ? X(r.until) : lx;
     const fill = PathBuilder.fill().move_to(pct(fx), "100%").line_to(pct(fx), pct(fy));
-    const line = PathBuilder.stroke(2).move_to(pct(fx), pct(fy));
-    curve([fill, line], xy);
-    fill.line_to(pct(lx), "100%").close();
+    const line = PathBuilder.stroke(2);
+    const unknown = PathBuilder.stroke(1.5);
+    runs.forEach((run, i) => {
+      if (i > 0) {
+        const [px, py] = runs[i - 1].at(-1);
+        fill.line_to(pct(run[0][0]), pct(run[0][1]));
+        dashed(unknown, px, py, run[0][0], run[0][1], 1.2, 1.2);
+      }
+      line.move_to(pct(run[0][0]), pct(run[0][1]));
+      curve([fill, line], run);
+    });
+    if (nx - lx > 0.3) dashed(unknown, lx, ly, nx, ly, 1.2, 1.2);
+    fill.line_to(pct(nx), pct(ly)).line_to(pct(nx), "100%").close();
     root.child(paint(fill, Background.linear_gradient(180, Background.stop(alpha(color, 0.5), 0), Background.stop(alpha(color, 0.03), 1))))
-      .child(paint(line, color));
+      .child(paint(line, color))
+      .child(paint(unknown, alpha(color, 0.6)));
 
     // Where today's rate lands: on to the reset, or up to 100% before it.
     const e = (r.until - r.from) / span, u = l.utilization ?? 0;
     if (now < r.to && e > 0.05 && u > 0) {
       const atReset = u / e;
       const end = atReset <= 100 ? [100, Y(atReset)] : [X(r.from + (100 / u) * (r.until - r.from)), 0];
-      root.child(paint(dashed(PathBuilder.stroke(1.5), lx, ly, end[0], end[1], 1.6, 1.2), alpha(color, 0.7)));
+      root.child(paint(dashed(PathBuilder.stroke(1.5), nx, ly, end[0], end[1], 1.6, 1.2), alpha(color, 0.7)));
     }
     // Now: a faint line and a dot on the latest value.
-    if (now < r.to) root.child(div().absolute().top(0).h(CHART_H).w(1).left(pct(lx)).bg(alpha(t.foreground, 0.25)));
-    root.child(div().absolute().left(pct(lx)).top(pct(ly)).ml(-6).mt(-6).size(12).rounded_full().bg(alpha(color, 0.25)))
-      .child(div().absolute().left(pct(lx)).top(pct(ly)).ml(-3.5).mt(-3.5).size(7).rounded_full().bg(color).border(1.5).border_color(t.popover));
+    if (now < r.to) root.child(div().absolute().top(0).h(CHART_H).w(1).left(pct(nx)).bg(alpha(t.foreground, 0.25)));
+    root.child(div().absolute().left(pct(nx)).top(pct(ly)).ml(-6).mt(-6).size(12).rounded_full().bg(alpha(color, 0.25)))
+      .child(div().absolute().left(pct(nx)).top(pct(ly)).ml(-3.5).mt(-3.5).size(7).rounded_full().bg(color).border(1.5).border_color(t.popover));
   }
   if (hover?.ts != null && hover.ts >= r.from && hover.ts <= r.to) {
-    const at = span > DAY ? dayHm(hover.ts) : hm(hover.ts);
-    const known = pts.filter(p => p.t <= hover.ts).at(-1);
+    const time = ts => (span > DAY ? dayHm(ts) : hm(ts));
+    const known = pts.filter(p => p.t <= hover.ts).at(-1), next = pts.find(p => p.t > hover.ts);
     const e = (r.until - r.from) / span, u = l.utilization ?? 0;
-    const lines = hover.ts > r.until
-      ? [[at, t.dim], [e > 0.05 && u > 0 ? `≈${Math.round(Math.min(999, (u / e) * ((hover.ts - r.from) / span)))}% at this rate` : "ahead", t.dim]]
-      : known ? [[at, t.dim], [`${Math.round(known.v * 10) / 10}%`, color]]
-      : [[at, t.dim], ["no readings yet", t.dim]];
+    let lines;
+    if (hover.ts > r.until) {
+      lines = [[time(hover.ts), t.dim], [e > 0.05 && u > 0 ? `≈${Math.round(Math.min(999, (u / e) * ((hover.ts - r.from) / span)))}% at this rate` : "ahead", t.dim]];
+    } else if (!known) {
+      lines = [[time(hover.ts), t.dim], ["no readings yet", t.dim]];
+    } else {
+      // The value is the last reading at or before the pointer; say when it was read if that
+      // was a while ago, and what came next across a stretch without readings.
+      lines = [[time(hover.ts), t.dim], [`${Math.round(known.v * 10) / 10}%`, color]];
+      if (hover.ts - known.t > 120) lines.push([`read ${time(known.t)}`, t.dim]);
+      if (next && next.t - known.t > gap) lines.push([`then ${Math.round(next.v * 10) / 10}% at ${time(next.t)}`, t.dim]);
+    }
     cursor(root, X(hover.ts), lines, t);
   }
   return root;
