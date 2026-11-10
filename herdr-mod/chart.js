@@ -185,9 +185,9 @@ function cursor(root, x, lines, t) {
 
 // ---- charts -------------------------------------------------------------------------------------
 
-// The same rule as the title's pace: early in a window (under 10% of its time and 20% used) a
+// The same rule as the title's pace: early in a window (under 10% of its time and 10% used) a
 // rate says nothing yet, so there is no forecast to draw.
-const trusted = (e, u) => e > 0 && u > 0 && (e >= 0.1 || u >= 20);
+const trusted = (e, u) => e > 0 && u > 0 && (e >= 0.1 || u >= 10);
 
 // The window so far. `l`: the limit (utilization, reset_at, window); `points`: { t, v } readings.
 // `hover`: { id, ts, set(ts | null, cx) } — the plot's element id, where the pointer is, and

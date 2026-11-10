@@ -30,7 +30,7 @@
 //
 // Pace: r = used share / elapsed share of the window. r = 1 hits 100% exactly at the reset, so
 // anything above 1 runs out before it. Green r <= 1, yellow above, red from 1.5 or 90% used;
-// › and ›› say the same. Early in a window (under 10% of its time and 20% used) r is noise:
+// › and ›› say the same. Early in a window (under 10% of its time and 10% used) r is noise:
 // it counts as on pace. The headline is the limit with the worst projection (used / elapsed).
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
@@ -190,7 +190,7 @@ function pace(w, now) {
   const e = elapsed(w, now), u = w.utilization;
   if (e === null || e <= 0 || isReset(w, now)) return null;
   const r = u / (e * 100);
-  const trusted = e >= 0.1 || u >= 20;
+  const trusted = e >= 0.1 || u >= 10;
   // Linear projection: at this rate, when does the window hit 100%? Only if before the reset.
   let runsOut = null;
   if (u > 0 && u < 100) {
