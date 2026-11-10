@@ -185,6 +185,10 @@ function cursor(root, x, lines, t) {
 
 // ---- charts -------------------------------------------------------------------------------------
 
+// The same rule as the title's pace: early in a window (under 10% of its time and 20% used) a
+// rate says nothing yet, so there is no forecast to draw.
+const trusted = (e, u) => e > 0 && u > 0 && (e >= 0.1 || u >= 20);
+
 // The window so far. `l`: the limit (utilization, reset_at, window); `points`: { t, v } readings.
 // `hover`: { id, ts, set(ts | null, cx) } — the plot's element id, where the pointer is, and
 // how to say it moved.
@@ -253,7 +257,7 @@ export function windowChart(l, points, r, now, t, color, hover) {
 
     // Where today's rate lands: on to the reset, or up to 100% before it.
     const e = (r.until - r.from) / span, u = l.utilization ?? 0;
-    if (now < r.to && e > 0.05 && u > 0) {
+    if (now < r.to && trusted(e, u)) {
       const atReset = u / e;
       const end = atReset <= 100 ? [100, Y(atReset)] : [X(r.from + (100 / u) * (r.until - r.from)), 0];
       root.child(paint(dashed(PathBuilder.stroke(1.5), nx, ly, end[0], end[1], 1.6, 1.2), alpha(color, 0.7)));
@@ -273,7 +277,7 @@ export function windowChart(l, points, r, now, t, color, hover) {
     const e = (r.until - r.from) / span, u = l.utilization ?? 0;
     let lines;
     if (hover.ts > r.until) {
-      lines = [[time(hover.ts), t.dim], [e > 0.05 && u > 0 ? `≈${Math.round(Math.min(999, (u / e) * ((hover.ts - r.from) / span)))}% at this rate` : "ahead", t.dim]];
+      lines = [[time(hover.ts), t.dim], [trusted(e, u) ? `≈${Math.round(Math.min(999, (u / e) * ((hover.ts - r.from) / span)))}% at this rate` : "too early for a forecast", t.dim]];
     } else if (!known) {
       lines = [[time(hover.ts), t.dim], ["no readings yet", t.dim]];
     } else {
