@@ -46,7 +46,7 @@ const PROVIDERS = [
 ];
 // Providers whose windows pi-langfuse reports.
 const LIVE = ["claude", "codex"];
-const POLL = 120000, EXTRAS = 600000, TICK = 60000, STALE = 10 * 60;
+const POLL = 120000, EXTRAS = 600000, TICK = 60000;
 const LF_WORKING = 10000, LF_IDLE = 60000, LF_CHECK = 5000;
 const DATA = "limits.data", HIDDEN = "limits.hidden", WHERE = "limits.where", OPEN = "limits.open", PINNED = "limits.pinned", POLLED = "limits.polledAt";
 // Langfuse: folded scores (written only when they change) and why the last read failed.
@@ -334,8 +334,6 @@ function focusedProvider() {
   return PROVIDERS.find(p => p.pi.some(re => re.test(provider)))?.id ?? null;
 }
 
-const dimFor = (row, focus, now) => focus && focus !== row.p.id ? 0.4 : !row.d?.updated_at || now - row.d.updated_at > STALE ? 0.6 : 1;
-
 function setOpen(key, open) {
   const cur = shared(OPEN) ?? [];
   setShared(OPEN, open ? [...new Set([...cur, key])] : cur.filter(x => x !== key));
@@ -432,7 +430,7 @@ export default class Limits extends View {
   // ---- status bar -------------------------------------------------------------------------------
 
   strip(t) {
-    const now = nowS(), focus = focusedProvider();
+    const now = nowS();
     const shown = allRows(now, { placeholders: true, show: inBar });
     // Fit the block: the plan goes first, then the countdown, then the window's name.
     const room = (this.width ?? Infinity) - 24 - Math.max(0, shown.length - 1) * 14;
@@ -442,7 +440,6 @@ export default class Limits extends View {
       const d = r.d, top = d && headline(r, now), many = limits(d).length > 1;
       const reset = top && isReset(top, now), tn = top && tone(top, now, t);
       return h_flex().id(`limits-${r.key}`).gap(6).items_center().flex_none().px(4).h(20).rounded(5).cursor_pointer()
-        .opacity(dimFor(r, focus, now))
         .hover(s => s.bg(t.hover))
         .on_click(() => d ? openChart(r.key) : this.menuAboveBar())
         .child(icon(r.p.id, 13))
@@ -500,7 +497,7 @@ export default class Limits extends View {
   }
 
   sidebar(t, block) {
-    const now = nowS(), focus = focusedProvider();
+    const now = nowS();
     const all = allRows(now, { placeholders: true, show: inSidebar });
     const rows = all.filter(r => r.d);
     // Nothing for the sidebar: the block folds away (loading still shows a row).
@@ -528,7 +525,6 @@ export default class Limits extends View {
         .child(div().min_w(narrow ? 0 : 32).text_right().text_color(tn.color).child(reset ? "–" : pctText(top.utilization)));
 
       if (narrow) return h_flex().id(`side-${r.key}`).h(ROW).gap(4).items_center().justify_center().rounded(6)
-        .opacity(dimFor(r, focus, now))
         .child(icon(r.p.id, 12)).when(Boolean(pct), el => el.child(pct.text_size(10.5)));
 
       const head = h_flex().id(`side-${r.key}`).h(ROW).px(4).gap(6).items_center().rounded(6).cursor_pointer()
@@ -552,7 +548,7 @@ export default class Limits extends View {
         .child(svg(`mods/workspace-chrome/chevron-${isOpen ? "down" : "right"}.svg`).size(8).flex_none().text_color(t.dim));
 
       const b = isOpen ? this.body(d, now) : null;
-      return v_flex().w_full().opacity(dimFor(r, focus, now))
+      return v_flex().w_full()
         .child(head)
         .when(isOpen, el => el.child(v_flex().px(4).pb(4)
           .when(Boolean(d.error), el => el.child(div().h(ERR).flex().items_center().text_size(11).truncate().text_color(top ? t.working : t.blocked)
