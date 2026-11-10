@@ -55,7 +55,7 @@ const LF = "limits.lf", LF_ERROR = "limits.lfError", POLLED_BY = "limits.polledA
 const MENU = "limits.menu", MENU_CLOSED = "limits.menuClosedAt", CHART = "limits.chart";
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // Sidebar sizes (px at zoom 1); height() must match what rows() draws.
-const ROW = 28, LIM = 20, LIM_STACKED = 30, NOTE = 18, EXTRA = 20, ERR = 18, PAD = 9;
+const ROW = 28, LIM = 20, LIM_STACKED = 30, EXTRA = 20, ERR = 18, PAD = 9;
 // An inline bar needs this much room; narrower sidebars put the bar under its numbers.
 const INLINE_MIN = 90 + 28 + 52 + 42 + 44 + 18;
 
@@ -263,13 +263,6 @@ function planName(id, raw) {
 }
 // An account's name, short: the part of an email before the @, else the id as is.
 const accountName = row => String(row.label ?? row.account ?? "").replace(/@.*/, "");
-
-// The pace part of a limit's note: "×1.4 · runs out in ~2h 10m", or null when unremarkable.
-function paceNote(w, now) {
-  const p = pace(w, now);
-  if (!p?.trusted || p.r <= 1) return null;
-  return [`×${p.r.toFixed(1)} pace`, p.runsOut != null ? `runs out in ~${span(p.runsOut)}` : null].filter(Boolean).join(" · ");
-}
 
 function extras(d, all = true) {
   const out = [];
@@ -490,7 +483,7 @@ export default class Limits extends View {
   // What an open row holds below its head.
   body(d, now) {
     const ls = limits(d);
-    return { ls, notes: ls.filter(w => !isReset(w, now) && paceNote(w, now)).length, ex: extras(d, false), err: Boolean(d?.error) };
+    return { ls, ex: extras(d, false), err: Boolean(d?.error) };
   }
 
   height(rows, narrow, open, now, lim) {
@@ -499,7 +492,7 @@ export default class Limits extends View {
     return PAD + rows.reduce((h, r) => {
       if (!open.includes(r.key) || !r.d) return h + ROW;
       const b = this.body(r.d, now);
-      return h + ROW + Math.max(1, b.ls.length) * lim + b.notes * NOTE + b.ex.length * EXTRA + (b.err ? ERR : 0) + 4;
+      return h + ROW + Math.max(1, b.ls.length) * lim + b.ex.length * EXTRA + (b.err ? ERR : 0) + 4;
     }, 0);
   }
 
@@ -570,7 +563,7 @@ export default class Limits extends View {
   }
 
   limitRow(r, w, now, t, isPinned, isTop, stacked) {
-    const reset = isReset(w, now), tn = tone(w, now, t), note = reset ? null : paceNote(w, now);
+    const reset = isReset(w, now), tn = tone(w, now, t);
     const label = div().flex_none().truncate().text_color(isPinned ? t.accent : isTop ? t.foreground : t.muted)
       .when(isTop, el => el.font_semibold()).child(w.label);
     const pct = h_flex().w(42).flex_none().gap(2).justify_end().items_center()
@@ -590,9 +583,7 @@ export default class Limits extends View {
           const cur = { ...(shared(PINNED) ?? {}) };
           if (isPinned) delete cur[r.key]; else cur[r.key] = w.label;
           setShared(PINNED, cur);
-        }))
-      .when(Boolean(note), el => el.child(div().h(NOTE).pb(3).flex().items_center().pl(stacked ? 0 : 58).text_size(10.5).truncate()
-        .text_color(tn.speed === 2 ? t.ansi1 : t.ansi3).child(note)));
+        }));
   }
 
   // ---- charts -----------------------------------------------------------------------------------
