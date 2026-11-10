@@ -44,6 +44,13 @@ How it works: [docs/architecture.md](docs/architecture.md) (Russian).
 - Charts: **Window** — the current window as a stepped area, the even-pace diagonal and a tick at
   now; **History** — the highest reading per bucket over the last 7 days (5h) or 28 days (7d).
 
+## History
+
+```sh
+bun scripts/backfill.ts            # dry run: what it would write
+bun scripts/backfill.ts --write    # scores from Langfuse generation headers and Codex CLI rollouts
+```
+
 ## Development
 
 ```sh
