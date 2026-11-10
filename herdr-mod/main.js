@@ -166,12 +166,15 @@ function allRows(now, { placeholders = false, show = () => true } = {}) {
 
 const findRow = key => allRows(nowS()).find(r => r.key === key) ?? null;
 
+// Series not shown: Claude's "7 days + extra" (7d_oi) repeats the weekly window with overage folded in.
+const SKIP_SERIES = new Set(["7d_oi"]);
+
 // Every limit of a row: the main windows, then per-model ones. `sid` names its Langfuse series.
 function limits(d) {
   const at = d?.updated_at ?? null, out = [];
   if (d?.five_hour) out.push({ ...d.five_hour, at: d.five_hour.at ?? at, sid: "5h", short: "5h", label: "5 hours", window: d.five_hour.window ?? 18000 });
   if (d?.seven_day) out.push({ ...d.seven_day, at: d.seven_day.at ?? at, sid: "7d", short: "7d", label: "7 days", window: d.seven_day.window ?? 604800 });
-  for (const m of d?.models ?? []) out.push({ ...m, at: m.at ?? at, sid: m.series ?? null, short: String(m.label).slice(0, 6), label: String(m.label) });
+  for (const m of d?.models ?? []) if (!SKIP_SERIES.has(m.series)) out.push({ ...m, at: m.at ?? at, sid: m.series ?? null, short: String(m.label).slice(0, 6), label: String(m.label) });
   return out;
 }
 
