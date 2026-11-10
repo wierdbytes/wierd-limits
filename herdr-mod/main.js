@@ -636,7 +636,7 @@ export default class Limits extends View {
       .when(Boolean(d.plan), el => el.child(badge(planName(row.p.id, d.plan), t)))
       .child(div().flex_1())
       .when(Boolean(d.updated_at), el => el.child(div().text_size(10.5).text_color(t.dim).child(`updated ${ago(d.updated_at, now)}`)))
-      .child(h_flex().gap(2).p(2).rounded(7).bg(t.surface).border(1).border_color(t.border).child(tab("window", "Window")).child(tab("history", "History")))
+      .child(h_flex().gap(2).p(2).rounded(7).bg(t.surface).border(1).border_color(t.border).child(tab("window", "Window")).child(tab("history", "History")).child(tab("90d", "90 days")))
       .child(div().id("chart-close").w(22).h(22).flex().items_center().justify_center().rounded(5).cursor_pointer().text_size(15).text_color(t.dim)
         .hover(s => s.bg(t.hover).text_color(t.foreground)).on_click(close).child("×"));
     return root.child(head).children(ls.map(l => this.chartRow(row, l, now, t)));

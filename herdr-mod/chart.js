@@ -16,9 +16,14 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // What to ask Langfuse for: the window [start, reset) by the minute (by the hour for long
-// windows), or the last week (a short window) / four weeks (a weekly one) by the hour.
+// windows); the last week (a short window) / four weeks (a weekly one) by the hour; or the
+// last 90 days by the (UTC) day, the highest reading of each.
 export function chartRange(l, range, now) {
   const short = (l.window ?? DAY * 7) <= 6 * HOUR;
+  if (range === "90d") {
+    const to = Math.ceil(now / DAY) * DAY;
+    return { from: to - 90 * DAY, to, until: now, granularity: "day", bars: 90 };
+  }
   if (range === "window" && l.reset_at != null && l.window) {
     const from = l.reset_at - l.window;
     return { from, to: l.reset_at, until: Math.min(now, l.reset_at), granularity: short ? "minute" : "hour" };
@@ -98,9 +103,17 @@ function frame(t, vticks) {
   return root;
 }
 
-// Tick times between `from` and `to`: whole hours, days or weeks, whichever gives a handful.
+// Tick times between `from` and `to`: whole hours, days, weeks or months, whichever gives a handful.
 export function ticks(from, to) {
   const span = to - from, out = [];
+  if (span > 45 * DAY) {
+    const d = new Date(from * 1000);
+    d.setDate(1); d.setHours(0, 0, 0, 0);
+    for (d.setMonth(d.getMonth() + 1); d.getTime() / 1000 < to; d.setMonth(d.getMonth() + 1)) {
+      out.push({ ts: d.getTime() / 1000, label: MONTHS[d.getMonth()] });
+    }
+    return out;
+  }
   const step = span <= 8 * HOUR ? HOUR : span <= 2 * DAY ? 6 * HOUR : span <= 10 * DAY ? DAY : 7 * DAY;
   const start = new Date(from * 1000);
   if (step < DAY) start.setMinutes(0, 0, 0);
@@ -260,7 +273,8 @@ export function historyChart(points, r, now, t, color, hover) {
   }
   if (hover?.ts != null) {
     const i = clamp(Math.floor((hover.ts - r.from) / size), 0, n - 1), v = vals[i], start = r.from + i * size;
-    const when = size < DAY ? `${dayHm(start)}–${hm(start + size)}` : dayHm(start);
+    const day = new Date(start * 1000);
+    const when = size < DAY ? `${dayHm(start)}–${hm(start + size)}` : `${DAYS[day.getUTCDay()]} ${day.getUTCDate()} ${MONTHS[day.getUTCMonth()]}`;
     cursor(root, ((i + 0.5) / n) * 100, [[when, t.dim], [v == null ? "no readings" : `max ${Math.round(v * 10) / 10}%`, v == null ? t.dim : color]], t);
   }
   return root;
