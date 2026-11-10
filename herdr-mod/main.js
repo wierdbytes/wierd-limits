@@ -37,7 +37,7 @@ import { h_flex, v_flex } from "gpui-base";
 import { exec, home, appHome, theme, settings, shared, setShared, props, run, layout, openOverlay, closeOverlay, nextCommand, focused, agents, terminals, readTextFile } from "herdr";
 import { rows as foldRows, emptyLf, seriesPoints } from "./reduce.js";
 import { Langfuse, credentialFiles, loadCredentials, sync } from "./langfuse.js";
-import { CHART_H, chartRange, windowChart, historyChart } from "./chart.js";
+import { CHART_H, alpha, axis, chartRange, emptyChart, historyChart, polledBar, windowChart } from "./chart.js";
 
 const PROVIDERS = [
   { id: "claude", name: "Claude", apps: ["claude", "claude-code"], pi: [/^anthropic/] },
@@ -362,15 +362,19 @@ function aboveBar(bar, x) {
   return { x: Math.round(Math.max(6, Math.min((x ?? right) - w / 2, right - w))), y: Math.round(Math.max(6, bar.y - h - 6)) };
 }
 
-// The charts of one account, in a dialog (one at a time).
-const CHART_W = 540, CHART_HEAD = 46, CHART_ROW = CHART_H + 50;
+// The charts of one account, in a dialog (one at a time). Sizes (px at zoom 1) must match
+// what chartView draws: a charted limit's title, plot and axis; a polled one's title and bar.
+const CHART_W = 620, CHART_PAD = 16, CHART_GAP = 16, CHART_HEAD = 26;
+const CHART_TITLE = 22, CHART_ROW = CHART_TITLE + 8 + CHART_H + 4 + 14, POLLED_ROW = CHART_TITLE + 8 + 6;
+const charted = (row, l) => Boolean(l.sid && row.series?.[l.sid]);
 function openChart(key) {
   const row = findRow(key);
   if (!row) return;
   const prev = shared(CHART);
   if (prev) closeOverlay(prev);
-  const n = Math.max(1, limits(row.d).length);
-  setShared(CHART, openOverlay({ mod: "limits", kind: "dialog", width: CHART_W, height: CHART_HEAD + n * CHART_ROW + 16, props: { chart: key } }));
+  const ls = limits(row.d);
+  const body = ls.reduce((h, l) => h + CHART_GAP + (charted(row, l) ? CHART_ROW : POLLED_ROW), 0) || CHART_GAP + 20;
+  setShared(CHART, openOverlay({ mod: "limits", kind: "dialog", width: CHART_W, height: CHART_PAD * 2 + CHART_HEAD + body, props: { chart: key } }));
 }
 
 // Sets where providers show; one that comes back from off is read at once.
@@ -393,7 +397,6 @@ export default class Limits extends View {
     }
     // Overlay ids left from before a restart name nothing.
     if (shared(MENU)) setShared(MENU, null);
-    if (shared(CHART)) setShared(CHART, null);
     syncLf(cx, { force: true });
     refresh(cx);
     cx.timer.every(LF_CHECK, cx => syncLf(cx));
@@ -618,50 +621,82 @@ export default class Limits extends View {
   chartView(t, key) {
     const now = nowS(), row = findRow(key);
     const close = () => { const id = props()?.overlay; if (id) closeOverlay(id); };
-    const root = v_flex().id("limits-chart").size_full().p(12).gap(10).bg(t.popover).text_size(12).text_color(t.muted);
+    const root = v_flex().id("limits-chart").size_full().p(CHART_PAD).gap(CHART_GAP).bg(t.popover).text_size(12).text_color(t.muted);
     if (!row?.d) return root.child(div().text_color(t.dim).child("No data for these limits."));
     const d = row.d, ls = limits(d);
-    const tab = (id, label) => div().id(`range-${id}`).px(8).py(2).rounded(5).cursor_pointer().text_size(11)
+    const tab = (id, label) => div().id(`range-${id}`).px(10).py(2).rounded(5).cursor_pointer().text_size(11)
       .when(this.range === id, el => el.bg(t.raised).text_color(t.foreground))
-      .when(this.range !== id, el => el.text_color(t.dim).hover(s => s.bg(t.hover)))
+      .when(this.range !== id, el => el.text_color(t.dim).hover(s => s.text_color(t.foreground)))
       .on_click((_e, cx) => { if (this.range !== id) { this.range = id; this.loadCharts(cx); cx.notify(); } })
       .child(label);
-    const head = h_flex().h(24).gap(8).items_center()
-      .child(icon(row.p.id, 15))
-      .child(div().text_size(13).font_semibold().text_color(t.foreground).child(row.p.name))
-      .when(row.multi, el => el.child(div().truncate().text_color(t.dim).child(row.label)))
+    const head = h_flex().h(CHART_HEAD).gap(8).items_center()
+      .child(icon(row.p.id, 16))
+      .child(div().text_size(14).font_semibold().text_color(t.foreground).child(row.p.name))
+      .when(row.multi, el => el.child(div().max_w(160).truncate().text_color(t.dim).child(row.label)))
       .when(Boolean(d.plan), el => el.child(badge(planName(row.p.id, d.plan), t)))
       .child(div().flex_1())
-      .child(h_flex().gap(2).p(2).rounded(7).border(1).border_color(t.border).child(tab("window", "Window")).child(tab("history", "History")))
-      .child(div().id("chart-close").px(6).rounded(5).cursor_pointer().text_size(14).text_color(t.dim)
+      .when(Boolean(d.updated_at), el => el.child(div().text_size(10.5).text_color(t.dim).child(`updated ${ago(d.updated_at, now)}`)))
+      .child(h_flex().gap(2).p(2).rounded(7).bg(t.surface).border(1).border_color(t.border).child(tab("window", "Window")).child(tab("history", "History")))
+      .child(div().id("chart-close").w(22).h(22).flex().items_center().justify_center().rounded(5).cursor_pointer().text_size(15).text_color(t.dim)
         .hover(s => s.bg(t.hover).text_color(t.foreground)).on_click(close).child("×"));
     return root.child(head).children(ls.map(l => this.chartRow(row, l, now, t)));
   }
 
-  chartRow(row, l, now, t) {
-    const name = l.sid && row.series?.[l.sid];
-    const reset = isReset(l, now), tn = tone(l, now, t), note = reset ? null : paceNote(l, now);
-    const c = name ? this.charts[`${name}:${this.range}`] : null;
-    const r = c?.r ?? chartRange(l, this.range, now);
-    const title = h_flex().h(18).gap(8).items_center()
-      .child(div().text_color(t.foreground).font_semibold().child(l.label))
-      .child(div().text_color(tn.color).child(reset ? "reset" : pctText(l.utilization)))
-      .when(!reset && l.reset_at != null, el => el.child(div().text_size(11).text_color(t.dim).child(`resets in ${span(l.reset_at - now)} · ${clock(l.reset_at, now)}`)))
+  // The pointer over one plot: its time, and the setter the plot reports moves to.
+  hoverOf(name) {
+    return {
+      id: `plot-${name}-${this.range}`,
+      ts: this.hover?.name === name ? this.hover.ts : null,
+      set: (ts, cx) => {
+        if (ts == null ? this.hover?.name !== name : this.hover?.name === name && this.hover.ts === ts) return;
+        this.hover = ts == null ? null : { name, ts };
+        cx.notify();
+      },
+    };
+  }
+
+  // A limit's headline: name, value, reset; on the right how its pace looks and where it lands.
+  chartTitle(l, now, t, tn, side) {
+    const reset = isReset(l, now);
+    return h_flex().h(CHART_TITLE).gap(8).items_end()
+      .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(l.label))
+      .child(div().text_size(16).font_semibold().text_color(tn.color).child(reset ? "–" : pctText(l.utilization)))
+      .when(!reset && l.reset_at != null, el => el.child(div().pb(1).text_size(11).text_color(t.dim).child(`resets in ${span(l.reset_at - now)} · ${clock(l.reset_at, now)}`)))
       .child(div().flex_1())
-      .when(Boolean(note), el => el.child(div().text_size(10.5).text_color(tn.speed === 2 ? t.ansi1 : t.ansi3).child(note)));
-    const empty = text => div().h(CHART_H).w_full().rounded(4).bg(t.raised).flex().items_center().justify_center().text_size(11).text_color(t.dim).child(text);
-    const chart = !name ? empty("No history: this limit is only polled")
-      : !c ? empty("Loading…")
-      : c.error ? empty(c.error)
-      : r.bars == null ? windowChart(l, c.points, r, now, t, tn.color)
-      : c.points.length ? historyChart(c.points, r, t) : empty("No readings in this range yet");
-    const inWindow = this.range === "window" && r.bars == null, long = r.to - r.from > 86400;
+      .children(side);
+  }
+
+  chartRow(row, l, now, t) {
+    const name = charted(row, l) ? row.series[l.sid] : null;
+    const reset = isReset(l, now), tn = tone(l, now, t), pc = reset ? null : pace(l, now);
+    const pill = (text, color) => div().px(6).py(1).rounded(4).bg(alpha(color, 0.14)).text_size(10.5).text_color(color).child(text);
+    const side = [];
+    if (pc?.trusted) {
+      side.push(pc.r > 1 ? pill(`×${pc.r.toFixed(1)} pace`, tn.speed === 2 ? t.ansi1 : t.ansi3) : pill("on pace", t.ansi2));
+      const atReset = pc.e > 0 ? l.utilization / pc.e : null;
+      side.push(div().text_size(10.5).text_color(pc.runsOut != null ? t.ansi1 : t.dim)
+        .child(pc.runsOut != null ? `100% in ~${span(pc.runsOut)}` : atReset != null ? `≈${Math.round(atReset)}% at reset` : ""));
+    }
+    if (!name) {
+      side.push(div().text_size(10.5).text_color(t.dim).child("polled, no history"));
+      return v_flex().gap(8).child(this.chartTitle(l, now, t, tn, side)).child(polledBar(reset ? 0 : l.utilization, reset ? null : elapsed(l, now), t, tn.color));
+    }
+    const c = this.charts[`${name}:${this.range}`];
+    const r = c?.r ?? chartRange(l, this.range, now);
+    const inWindow = r.bars == null;
+    const chart = !c ? emptyChart("Loading…", t)
+      : c.error ? emptyChart(c.error, t)
+      : inWindow ? windowChart(l, c.points, r, now, t, tn.color, this.hoverOf(name))
+      : c.points.length ? historyChart(c.points, r, now, t, t.accent, this.hoverOf(name)) : emptyChart("No readings in this range yet", t);
+    const long = r.to - r.from > 86400;
     const left = inWindow ? (long ? dayClock(r.from) : clock(r.from, now)) : `${Math.round((now - r.from) / 86400)} days ago`;
-    const right = inWindow ? `resets ${long ? dayClock(r.to) : clock(r.to, now)}` : "now";
-    return v_flex().gap(4)
-      .child(title)
+    const right = inWindow ? `↺ ${long ? dayClock(r.to) : clock(r.to, now)}` : "now";
+    return v_flex()
+      .child(this.chartTitle(l, now, t, tn, side))
+      .child(div().h(8))
       .child(chart)
-      .child(h_flex().h(14).justify_between().text_size(10).text_color(t.dim).child(left).child(right));
+      .child(div().h(4))
+      .child(axis(r, left, right, t));
   }
 
   // ---- popup ------------------------------------------------------------------------------------

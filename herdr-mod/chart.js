@@ -1,11 +1,19 @@
-// Drawing a limit's history: the current window as an area (with the even-pace diagonal and
-// a tick at now), or several days as bars of the highest reading per bucket.
+// Drawing a limit's history.
+//   windowChart   the current window: what was read so far as a smooth area (a window's usage
+//                 only grows, so a monotone curve never invents a dip), the stretch before the
+//                 first reading hatched, the even pace dashed corner to corner, where today's
+//                 rate lands by the reset dashed from now, and a dot on the latest value.
+//   historyChart  days of windows: the highest reading per bucket as a skyline; buckets
+//                 without readings leave gaps.
+//   polledBar     a limit only ai-usage knows: no series, just where it stands.
+// Coordinates are percentages of the plot, so the paths follow the dialog's size.
 import { div, PathBuilder, Background } from "gpui-kit";
-import { h_flex } from "gpui-base";
 import { buckets } from "./reduce.js";
 
-export const CHART_H = 64;
+export const CHART_H = 96;
 const HOUR = 3600, DAY = 86400;
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // What to ask Langfuse for: the window [start, reset) by the minute (by the hour for long
 // windows), or the last week (a short window) / four weeks (a weekly one) by the hour.
@@ -15,53 +23,261 @@ export function chartRange(l, range, now) {
     const from = l.reset_at - l.window;
     return { from, to: l.reset_at, until: Math.min(now, l.reset_at), granularity: short ? "minute" : "hour" };
   }
-  const days = short ? 7 : 28;
-  return { from: now - days * DAY, to: now, until: now, granularity: "hour", bars: short ? 84 : 112 };
+  // Buckets on whole local hours (a short window) or quarter days (a weekly one).
+  const days = short ? 7 : 28, size = (short ? 1 : 6) * HOUR;
+  const tz = new Date(now * 1000).getTimezoneOffset() * 60;
+  const to = Math.ceil((now - tz) / size) * size + tz;
+  return { from: to - days * DAY, to, until: now, granularity: "hour", bars: (days * DAY) / size };
 }
 
-const pct = n => `${Math.round(Math.max(0, Math.min(100, n)) * 100) / 100}%`;
+// ---- small helpers ------------------------------------------------------------------------------
 
-// The window so far as a stepped area: readings only grow inside a window, so each one holds
-// until the next. Before the first reading nothing is known (usage may come from elsewhere).
-export function windowChart(l, points, r, now, t, color) {
-  const span = r.to - r.from;
-  const x = ts => pct(((ts - r.from) / span) * 100);
-  const y = v => pct(100 - v);
-  const pts = points.filter(p => p.t >= r.from - 60 && p.t <= r.to);
-  // The latest value known (it may come from ai-usage) closes the series at now.
-  if (l.utilization != null && r.until > r.from) {
-    const last = pts.at(-1);
-    if (!last || l.utilization >= last.v) pts.push({ t: r.until, v: l.utilization });
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const pct = n => `${Math.round(clamp(n, 0, 100) * 100) / 100}%`;
+
+// A theme colour with this opacity (themes give #rrggbb or #rrggbbaa).
+export function alpha(color, a) {
+  const c = String(color);
+  const hex = n => Math.round(clamp(n, 0, 1) * 255).toString(16).padStart(2, "0");
+  if (/^#[0-9a-f]{6}$/i.test(c)) return c + hex(a);
+  if (/^#[0-9a-f]{8}$/i.test(c)) return c.slice(0, 7) + hex((parseInt(c.slice(7), 16) / 255) * a);
+  return c;
+}
+
+const paint = (builder, background) =>
+  globalThis.window.paint_path(builder.build(), background).absolute().top(0).left(0).size_full();
+
+// Fritsch–Carlson: tangents for a monotone cubic through (x, y) points with increasing x.
+function monotoneTangents(p) {
+  const n = p.length, d = [], m = new Array(n).fill(0);
+  for (let i = 0; i < n - 1; i++) d.push((p[i + 1][1] - p[i][1]) / (p[i + 1][0] - p[i][0] || 1e-9));
+  if (n < 2) return m;
+  m[0] = d[0];
+  m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
+    const a = m[i] / d[i], b = m[i + 1] / d[i], s = a * a + b * b;
+    if (s > 9) { const k = 3 / Math.sqrt(s); m[i] = k * a * d[i]; m[i + 1] = k * b * d[i]; }
   }
-  const root = div().relative().w_full().h(CHART_H).rounded(4).bg(t.raised).overflow_hidden()
-    .child(div().absolute().left(0).top(CHART_H / 2).w_full().h(1).bg(t.border));
-  // Even pace: 0% at the window's start, 100% at its reset.
-  const even = PathBuilder.stroke(1).move_to("0%", "100%").line_to("100%", "0%").build();
-  root.child(globalThis.window.paint_path(even, t.dim).absolute().top(0).left(0).size_full());
-  if (pts.length) {
-    const fill = PathBuilder.fill().move_to(x(pts[0].t), "100%").line_to(x(pts[0].t), y(pts[0].v));
-    const line = PathBuilder.stroke(1.5).move_to(x(pts[0].t), y(pts[0].v));
-    for (let i = 1; i < pts.length; i++) {
-      for (const b of [fill, line]) b.line_to(x(pts[i].t), y(pts[i - 1].v)).line_to(x(pts[i].t), y(pts[i].v));
-    }
-    const end = Math.max(pts.at(-1).t, r.until);
-    fill.line_to(x(end), y(pts.at(-1).v)).line_to(x(end), "100%").close();
-    line.line_to(x(end), y(pts.at(-1).v));
-    root.child(globalThis.window.paint_path(fill.build(), Background.solid(color).opacity(0.22)).absolute().top(0).left(0).size_full())
-      .child(globalThis.window.paint_path(line.build(), color).absolute().top(0).left(0).size_full());
+  return m;
+}
+
+// Appends a monotone curve through `p` (already started at p[0]) to every builder given.
+function curve(builders, p) {
+  const m = monotoneTangents(p);
+  for (let i = 0; i < p.length - 1; i++) {
+    const [x0, y0] = p[i], [x1, y1] = p[i + 1], h = (x1 - x0) / 3;
+    for (const b of builders) b.cubic_bezier_to(pct(x1), pct(y1), pct(x0 + h), pct(y0 + m[i] * h), pct(x1 - h), pct(y1 - m[i + 1] * h));
   }
-  // Where the window's time stands.
-  if (now < r.to) root.child(div().absolute().top(0).h(CHART_H).w(1).bg(t.foreground).opacity(0.5).left(x(now)));
+}
+
+// A dashed straight line as short subpaths.
+function dashed(b, x0, y0, x1, y1, dash = 1.4, gap = 1.1) {
+  const len = Math.hypot(x1 - x0, y1 - y0);
+  if (len <= 0) return b;
+  for (let s = 0; s < len; s += dash + gap) {
+    const e = Math.min(len, s + dash);
+    b.move_to(pct(x0 + ((x1 - x0) * s) / len), pct(y0 + ((y1 - y0) * s) / len))
+      .line_to(pct(x0 + ((x1 - x0) * e) / len), pct(y0 + ((y1 - y0) * e) / len));
+  }
+  return b;
+}
+
+// The plot's frame: faint quarter lines, a firmer baseline, the 90–100% band tinted, labels.
+function frame(t, vticks) {
+  const root = div().relative().w_full().h(CHART_H);
+  root.child(div().absolute().left(0).top(0).w_full().h("10%").bg(alpha(t.ansi1, 0.06)));
+  for (const q of [25, 50, 75]) root.child(div().absolute().left(0).top(pct(100 - q)).w_full().h(1).bg(alpha(t.border, q === 50 ? 1 : 0.55)));
+  root.child(div().absolute().left(0).top(0).w_full().h(1).bg(alpha(t.ansi1, 0.25)));
+  root.child(div().absolute().left(0).bottom(0).w_full().h(1).bg(t.border));
+  for (const x of vticks) root.child(div().absolute().top(0).h(CHART_H).w(1).left(pct(x)).bg(alpha(t.border, 0.55)));
+  for (const [v, top] of [[100, 1], [50, CHART_H / 2 - 12]]) {
+    root.child(div().absolute().right(3).top(top).text_size(9).text_color(alpha(t.dim, 0.9)).child(`${v}%`));
+  }
   return root;
 }
 
-// Days as bars: the highest reading in each bucket, coloured by how close it came to the cap.
-export function historyChart(points, r, t) {
-  const vals = buckets(points, r.from, r.to, r.bars);
-  const tone = v => (v >= 90 ? t.ansi1 : v >= 70 ? t.ansi3 : t.ansi2);
-  return h_flex().relative().w_full().h(CHART_H).items_end().gap(1).px(1).rounded(4).bg(t.raised).overflow_hidden()
-    .child(div().absolute().left(0).top(CHART_H / 2).w_full().h(1).bg(t.border))
-    .children(vals.map(v => div().flex_1().min_w(1).rounded_t(1)
-      .h(v == null ? 0 : pct(Math.max(3, v)))
-      .bg(v == null ? t.raised : tone(v))));
+// Tick times between `from` and `to`: whole hours, days or weeks, whichever gives a handful.
+export function ticks(from, to) {
+  const span = to - from, out = [];
+  const step = span <= 8 * HOUR ? HOUR : span <= 2 * DAY ? 6 * HOUR : span <= 10 * DAY ? DAY : 7 * DAY;
+  const start = new Date(from * 1000);
+  if (step < DAY) start.setMinutes(0, 0, 0);
+  else start.setHours(0, 0, 0, 0);
+  for (let ts = start.getTime() / 1000; ts < to; ts += step) {
+    // Local midnights move with DST: snap each one back to 00:00.
+    const d = new Date(ts * 1000);
+    if (step >= DAY && d.getHours() !== 0) { d.setHours(0, 0, 0, 0); if (d.getTime() / 1000 < ts - HOUR) d.setDate(d.getDate() + 1); ts = d.getTime() / 1000; }
+    if (ts > from) out.push(ts);
+  }
+  const label = ts => {
+    const d = new Date(ts * 1000);
+    if (step < DAY) return `${String(d.getHours()).padStart(2, "0")}:00`;
+    if (step === DAY) return `${DAYS[d.getDay()]} ${d.getDate()}`;
+    return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  };
+  return out.map(ts => ({ ts, label: label(ts) }));
 }
+
+// The labels under a plot: its ends, and the ticks between them away from the ends.
+export function axis(r, left, right, t) {
+  const span = r.to - r.from;
+  const row = div().relative().w_full().h(14).text_size(10).text_color(t.dim)
+    .child(div().absolute().left(0).top(0).child(left))
+    .child(div().absolute().right(0).top(0).child(right));
+  for (const tk of ticks(r.from, r.to)) {
+    const x = ((tk.ts - r.from) / span) * 100;
+    if (x < 9 || x > 88) continue;
+    row.child(div().absolute().top(0).left(pct(x)).ml(-30).w(60).flex().justify_center().child(tk.label));
+  }
+  return row;
+}
+
+const tickXs = r => ticks(r.from, r.to).map(tk => ((tk.ts - r.from) / (r.to - r.from)) * 100);
+
+const hm = ts => { const d = new Date(ts * 1000); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+const dayHm = ts => { const d = new Date(ts * 1000); return `${DAYS[d.getDay()]} ${d.getDate()}, ${hm(ts)}`; };
+
+// The pointer over a plot, as a time snapped to `step` seconds: `hover(ts | null, cx)` is
+// called only when that time changes, so moving within one step redraws nothing.
+function track(el, r, step, hover) {
+  if (!hover?.set) return el;
+  const report = (ts, cx) => { if (ts !== hover.ts) hover.set(ts, cx); };
+  return el.id(hover.id)
+    .on_mouse_move((e, cx) => {
+      const w = e.bounds?.width;
+      if (!w) return;
+      const f = clamp(e.local_position.x / w, 0, 1);
+      report(Math.round((r.from + f * (r.to - r.from)) / step) * step, cx);
+    })
+    .on_hover((inside, cx) => { if (!inside) report(null, cx); });
+}
+
+// A cursor line and a label at `ts` (percent `x`), the label on whichever side has room.
+function cursor(root, x, lines, t) {
+  root.child(div().absolute().top(0).h(CHART_H).w(1).left(pct(x)).bg(alpha(t.foreground, 0.45)));
+  const box = div().absolute().top(6).px(6).py(3).rounded(5).bg(t.raised).border(1).border_color(t.border)
+    .text_size(10.5).text_color(t.foreground)
+    .children(lines.map(([text, color]) => div().text_color(color ?? t.foreground).child(text)));
+  root.child(x > 62 ? box.right(pct(100 - x)).mr(8) : box.left(pct(x)).ml(8));
+}
+
+// ---- charts -------------------------------------------------------------------------------------
+
+// The window so far. `l`: the limit (utilization, reset_at, window); `points`: { t, v } readings.
+// `hover`: { id, ts, set(ts | null, cx) } — the plot's element id, where the pointer is, and
+// how to say it moved.
+export function windowChart(l, points, r, now, t, color, hover) {
+  const span = r.to - r.from;
+  const X = ts => clamp(((ts - r.from) / span) * 100, 0, 100);
+  const Y = v => 100 - clamp(v, 0, 100);
+  const pts = points.filter(p => p.t >= r.from - 60 && p.t <= r.to).map(p => ({ ...p }));
+  // The latest value known (it may come from ai-usage) closes the series at now.
+  if (l.utilization != null && r.until > r.from) {
+    const last = pts.at(-1);
+    if (!last || (l.utilization >= last.v && r.until > last.t)) pts.push({ t: r.until, v: l.utilization });
+  }
+  // One point per x: readings in the same minute collapse to their highest.
+  const xy = [];
+  for (const p of pts) {
+    const x = X(p.t), y = Y(p.v), prev = xy.at(-1);
+    if (prev && x - prev[0] < 0.05) prev[1] = Math.min(prev[1], y);
+    else xy.push([x, y]);
+  }
+
+  const root = track(frame(t, tickXs(r)), r, span <= 6 * HOUR ? 60 : 900, hover);
+  // Even pace: 0% at the window's start, 100% at its reset.
+  root.child(paint(dashed(PathBuilder.stroke(1), 0, 100, 100, 0), alpha(t.dim, 0.8)));
+
+  if (xy.length) {
+    const [fx, fy] = xy[0];
+    // Before the first reading nothing is known but the start at 0%: hatch that stretch.
+    if (fx > 1.5) {
+      root.child(paint(PathBuilder.fill().move_to("0%", "100%").line_to(pct(fx), pct(fy)).line_to(pct(fx), "100%").close(),
+        Background.pattern_slash(alpha(color, 0.22), 1, 5)));
+      root.child(paint(dashed(PathBuilder.stroke(1), 0, 100, fx, fy, 0.9, 0.9), alpha(color, 0.5)));
+    }
+    const lx = xy.at(-1)[0], ly = xy.at(-1)[1];
+    const fill = PathBuilder.fill().move_to(pct(fx), "100%").line_to(pct(fx), pct(fy));
+    const line = PathBuilder.stroke(2).move_to(pct(fx), pct(fy));
+    curve([fill, line], xy);
+    fill.line_to(pct(lx), "100%").close();
+    root.child(paint(fill, Background.linear_gradient(180, Background.stop(alpha(color, 0.5), 0), Background.stop(alpha(color, 0.03), 1))))
+      .child(paint(line, color));
+
+    // Where today's rate lands: on to the reset, or up to 100% before it.
+    const e = (r.until - r.from) / span, u = l.utilization ?? 0;
+    if (now < r.to && e > 0.05 && u > 0) {
+      const atReset = u / e;
+      const end = atReset <= 100 ? [100, Y(atReset)] : [X(r.from + (100 / u) * (r.until - r.from)), 0];
+      root.child(paint(dashed(PathBuilder.stroke(1.5), lx, ly, end[0], end[1], 1.6, 1.2), alpha(color, 0.7)));
+    }
+    // Now: a faint line and a dot on the latest value.
+    if (now < r.to) root.child(div().absolute().top(0).h(CHART_H).w(1).left(pct(lx)).bg(alpha(t.foreground, 0.25)));
+    root.child(div().absolute().left(pct(lx)).top(pct(ly)).ml(-6).mt(-6).size(12).rounded_full().bg(alpha(color, 0.25)))
+      .child(div().absolute().left(pct(lx)).top(pct(ly)).ml(-3.5).mt(-3.5).size(7).rounded_full().bg(color).border(1.5).border_color(t.popover));
+  }
+  if (hover?.ts != null && hover.ts >= r.from && hover.ts <= r.to) {
+    const at = span > DAY ? dayHm(hover.ts) : hm(hover.ts);
+    const known = pts.filter(p => p.t <= hover.ts).at(-1);
+    const e = (r.until - r.from) / span, u = l.utilization ?? 0;
+    const lines = hover.ts > r.until
+      ? [[at, t.dim], [e > 0.05 && u > 0 ? `≈${Math.round(Math.min(999, (u / e) * ((hover.ts - r.from) / span)))}% at this rate` : "ahead", t.dim]]
+      : known ? [[at, t.dim], [`${Math.round(known.v * 10) / 10}%`, color]]
+      : [[at, t.dim], ["no readings yet", t.dim]];
+    cursor(root, X(hover.ts), lines, t);
+  }
+  return root;
+}
+
+// Several days: the highest reading per bucket as steps; gaps where nothing was read.
+export function historyChart(points, r, now, t, color, hover) {
+  const vals = buckets(points, r.from, r.to, r.bars), n = vals.length, size = (r.to - r.from) / n;
+  const root = track(frame(t, tickXs(r)), r, size, hover);
+  const fill = PathBuilder.fill(), line = PathBuilder.stroke(1.5);
+  let any = false;
+  for (let i = 0; i < n; i++) {
+    if (vals[i] == null) continue;
+    // A run of buckets with readings: one stepped shape.
+    let j = i;
+    while (j + 1 < n && vals[j + 1] != null) j++;
+    const x = k => (k / n) * 100, y = v => 100 - clamp(v, 0, 100);
+    fill.move_to(pct(x(i)), "100%");
+    line.move_to(pct(x(i)), pct(y(vals[i])));
+    for (let k = i; k <= j; k++) {
+      fill.line_to(pct(x(k)), pct(y(vals[k]))).line_to(pct(x(k + 1)), pct(y(vals[k])));
+      if (k > i) line.line_to(pct(x(k)), pct(y(vals[k])));
+      line.line_to(pct(x(k + 1)), pct(y(vals[k])));
+    }
+    fill.line_to(pct(x(j + 1)), "100%").close();
+    any = true;
+    i = j;
+  }
+  if (any) {
+    root.child(paint(fill, Background.linear_gradient(180, Background.stop(alpha(color, 0.45), 0), Background.stop(alpha(color, 0.04), 1))))
+      .child(paint(line, color));
+  }
+  if (hover?.ts != null) {
+    const i = clamp(Math.floor((hover.ts - r.from) / size), 0, n - 1), v = vals[i], start = r.from + i * size;
+    const when = size < DAY ? `${dayHm(start)}–${hm(start + size)}` : dayHm(start);
+    cursor(root, ((i + 0.5) / n) * 100, [[when, t.dim], [v == null ? "no readings" : `max ${Math.round(v * 10) / 10}%`, v == null ? t.dim : color]], t);
+  }
+  return root;
+}
+
+// Where a limit stands when there is no series: a 6px track, the window's time as a tick.
+export function polledBar(u, elapsed, t, color) {
+  const used = clamp(u ?? 0, 0, 100);
+  return div().relative().w_full().h(6).rounded(3).bg(t.raised)
+    .when(used > 0, el => el.child(div().absolute().left(0).top(0).h(6).rounded(3).w(pct(Math.max(1.5, used)))
+      .bg(color)))
+    .when(elapsed != null, el => el.child(div().absolute().top(-3).h(12).w(1).left(pct(elapsed * 100)).bg(alpha(t.foreground, 0.6))));
+}
+
+// The chart's empty state.
+export function emptyChart(text, t) {
+  return div().h(CHART_H).w_full().rounded(6).border(1).border_color(t.border).flex().items_center().justify_center()
+    .text_size(11).text_color(t.dim).child(text);
+}
+
