@@ -57,7 +57,9 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // Sidebar sizes (px at zoom 1); height() must match what rows() draws.
 const ROW = 28, LIM = 20, LIM_STACKED = 30, EXTRA = 20, ERR = 18, PAD = 9;
 // An inline bar needs this much room; narrower sidebars put the bar under its numbers.
-const INLINE_MIN = 90 + 28 + 52 + 42 + 44 + 18;
+const INLINE_MIN = 90 + 28 + 52 + 42 + 46 + 18;
+// The terminal's face, as the agents panel uses for its numbers: percents and countdowns line up.
+const mono = () => settings().font_family ?? "JetBrains Mono";
 
 const nowS = () => Date.now() / 1000;
 // Where a provider shows. Before "where" there was only a hidden list: hidden is "off".
@@ -522,7 +524,7 @@ export default class Limits extends View {
       const reset = top && isReset(top, now), tn = top && tone(top, now, t);
       const pct = top && h_flex().flex_none().gap(2).items_center().justify_end()
         .when(tn.speed > 0, el => el.child(div().text_color(tn.color).font_semibold().child(chevrons(tn.speed))))
-        .child(div().min_w(narrow ? 0 : 32).text_right().text_color(tn.color).child(reset ? "–" : pctText(top.utilization)));
+        .child(div().min_w(narrow ? 0 : 32).text_right().font_family(mono()).text_color(tn.color).child(reset ? "–" : pctText(top.utilization)));
 
       if (narrow) return h_flex().id(`side-${r.key}`).h(ROW).gap(4).items_center().justify_center().rounded(6)
         .child(icon(r.p.id, 12)).when(Boolean(pct), el => el.child(pct.text_size(10.5)));
@@ -537,7 +539,7 @@ export default class Limits extends View {
         // The countdown gives way first when the sidebar is narrow; the % and arrow stay put.
         .child(h_flex().flex_1().min_w(0).justify_end().overflow_hidden()
           .when(Boolean(top) && !isOpen && top.reset_at != null && !reset, el => el
-            .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(span(top.reset_at - now)))))
+            .child(div().min_w(0).truncate().font_family(mono()).text_size(10.5).text_color(t.dim).child(span(top.reset_at - now)))))
         .when(Boolean(d.error) && !isOpen, el => el.child(div().flex_none().text_size(11).font_semibold().text_color(top ? t.working : t.blocked).child("!")))
         .when(Boolean(pct) && !isOpen, el => el.child(pct))
         .when(!top && !isOpen, el => el.child(div().text_color(t.dim).child("--")))
@@ -568,8 +570,8 @@ export default class Limits extends View {
       .when(isTop, el => el.font_semibold()).child(w.label);
     const pct = h_flex().w(42).flex_none().gap(2).justify_end().items_center()
       .when(tn.speed > 0, el => el.child(div().font_semibold().text_color(tn.color).child(chevrons(tn.speed))))
-      .child(div().text_color(tn.color).child(reset ? "–" : pctText(w.utilization)));
-    const resets = div().w(44).flex_none().text_right().text_size(10.5).text_color(t.dim)
+      .child(div().font_family(mono()).text_color(tn.color).child(reset ? "–" : pctText(w.utilization)));
+    const resets = div().w(46).flex_none().text_right().font_family(mono()).text_size(10.5).text_color(t.dim)
       .child(!reset && w.reset_at != null ? span(w.reset_at - now) : "");
     const line = stacked
       ? v_flex().h(LIM_STACKED).justify_center().gap(4)
