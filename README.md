@@ -18,7 +18,8 @@ How it works: [docs/architecture.md](docs/architecture.md) (Russian).
 1. pi-langfuse from the fork, rate-limit scores on:
 
    ```sh
-   git clone -b feat/rate-limit-scores https://github.com/wierdbytes/pi-langfuse ../pi-langfuse && cd ../pi-langfuse && git checkout feat/rate-limit-scores && npm ci
+   git clone -b feat/rate-limit-scores https://github.com/wierdbytes/pi-langfuse ../pi-langfuse
+   (cd ../pi-langfuse && npm ci)
    # ~/.pi/agent/settings.json: "packages": [..., "/path/to/pi-langfuse", ...] instead of "npm:pi-langfuse"
    # ~/.pi/agent/pi-langfuse/config.json:
    #   "capture": { "PI_LANGFUSE_RATE_LIMIT_SCORES": "true" }
@@ -34,6 +35,10 @@ How it works: [docs/architecture.md](docs/architecture.md) (Russian).
 
    Keys come from `~/.pi/agent/pi-langfuse/config.json`; a `mods/limits/langfuse.json` with
    `{ "host", "publicKey", "secretKey" }` overrides them.
+
+3. Optional: an `~/bin/ai-usage <claude|codex|qwen> json` script that polls the providers' usage
+   endpoints (plan name, per-model weekly limits, extra spend, credits, Qwen). It is not part of
+   this repository; without it the mod shows what pi reports and marks the poll as failed.
 
 ## Using it
 
