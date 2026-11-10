@@ -1,0 +1,124 @@
+# wierd-limits — архитектура
+
+Лимиты подписок (Claude, Codex, Qwen) в herdr-app. Отдельного сервера нет: хранилищем служит
+self-hosted Langfuse, который и так получает трейсы pi.
+
+```
+pi + pi-langfuse (форк, ветка feat/rate-limit-scores)
+  after_provider_response  ─┐  разбор заголовков / события
+  provider_stream_event    ─┘  → score rl.<provider>.<account>.<window> на generation
+                                    │  ingestion score-create (очередь скоров pi-langfuse)
+                                    ▼
+                             Langfuse, проект pi-langfuse
+                                    │  v3/scores (текущие значения), v2/metrics (графики)
+                                    ▼
+herdr-app, мод limits ◄──── exec ~/bin/ai-usage (тариф, лимиты по моделям, extra, credits, Qwen)
+  reduce.js: свёртка скоров + ai-usage → одна строка на аккаунт
+  статус-бар / сайдбар / диалог с графиками
+```
+
+## 1. Откуда берутся лимиты
+
+| Подписка | Канал в pi | Поля | Единицы |
+|---|---|---|---|
+| Claude (OAuth) | `after_provider_response`, заголовки `anthropic-ratelimit-unified-*` | `{5h,7d,7d_oi…}-{utilization,reset,status}`, `representative-claim`, `status`; аккаунт — `anthropic-organization-id` | доля 0..1 (бывает > 1), epoch s |
+| Codex | `provider_stream_event` `codex.rate_limits` (WebSocket, транспорт по умолчанию); заголовки `x-<family>-{primary,secondary}-*` (SSE) | `used_percent`, `window_minutes`, `reset_at`, `plan_type`; аккаунт — `accountId` из `~/.pi/agent/auth.json` | %, минуты, epoch s |
+| Qwen Token Plan | нет: заголовков с лимитами провайдер не отдаёт | только опрос консоли через `ai-usage` | |
+
+Чего нет в ответах: название тарифа Claude, недельные лимиты по моделям (Opus/Sonnet/Fable),
+extra usage и credits. Всё это по-прежнему берёт `ai-usage` из usage-эндпоинтов.
+
+Пробел: на 429 от Anthropic SDK бросает исключение, и `after_provider_response` не вызывается.
+Состояние перед отказом при этом известно из предыдущего ответа (≈100%).
+
+## 2. pi-langfuse: запись
+
+Включается флагом `PI_LANGFUSE_RATE_LIMIT_SCORES=true`: переменная окружения или
+`capture` в `~/.pi/agent/pi-langfuse/config.json`. Код: `src/rate-limits.ts` (разбор, аккаунты,
+решение «писать или нет») и `src/handlers/rate-limits.ts` (привязка к generation).
+
+Каждое окно пишется NUMERIC-скором:
+
+| Поле | Значение |
+|---|---|
+| `name` | `rl.<provider>.<account>.<window>`: `rl.claude.3f9a1c2e.5h`, `rl.codex.b81d07aa.7d`, `rl.codex.…​.bengalfox.5h` |
+| `value` | процент использованного |
+| subject | `traceId` + `observationId` generation, которая принесла ответ; без открытой generation — `sessionId` pi |
+| `timestamp` | когда пришёл ответ (время события ingestion, а не момент отправки) |
+| `metadata` | `resets_at`, `window_s`, `status` (`ok`/`warning`/`exhausted`), `label`, `binding`, `plan`, `account_label` (email ChatGPT), `source`, `model`, `host` |
+
+`<account>` — первые 8 hex sha256 от id организации Anthropic или ChatGPT-аккаунта (`main`, если
+id неизвестен). Аккаунт обязан быть в имени: в `v3/scores` нет фильтра по metadata, а в
+`v2/metrics` нет группировки по metadata.
+
+Окно пишется, когда меняется округлённый процент, время сброса или статус, а также раз в
+`PI_LANGFUSE_RATE_LIMIT_HEARTBEAT` секунд (по умолчанию 600), чтобы читатель отличал живые данные
+от устаревших. Запоминает записанное каждый процесс pi отдельно, поэтому параллельные сессии
+иногда пишут одно и то же значение дважды. Это безвредно: читатель сворачивает показания.
+
+## 3. Мод herdr: чтение
+
+Код: `herdr-mod/` (ставится в `~/.config/herdr-app/mods/limits` через
+`scripts/install-mod.sh`).
+
+- **Ключи** берутся из конфига pi-langfuse (`~/.pi/agent/pi-langfuse/config.json`). Файл
+  `mods/limits/langfuse.json` с `{host, publicKey, secretKey}` имеет приоритет.
+- **Текущие значения** (`langfuse.js`, `sync`):
+  - первый раз и после перерыва больше 30 мин: `v2/metrics` даёт список рядов `rl.*` за 8 дней,
+    затем для каждого берётся последний скор (`v3/scores?name=…&limit=1`);
+  - дальше раз в 10 с, пока в herdr работает агент, иначе раз в минуту:
+    `v3/scores?fromTimestamp=<курсор − 90 с>`. Перекрытие в 90 с покрывает задержку записи
+    (≈7 с, около полуночи UTC до ≈18 с).
+- **Свёртка** (`reduce.js`, `applyScores`) идемпотентна:
+  - окно определяется по `resets_at` с допуском ±120 с;
+  - внутри окна берётся максимум, показание более позднего окна заменяет текущее, раннего —
+    отбрасывается.
+- **Слияние с ai-usage** (`reduce.js`, `rows`):
+  - окна сворачиваются по тем же правилам;
+  - тариф, лимиты по моделям, extra и credits берутся из ai-usage;
+  - ошибка ai-usage не показывается, пока данные из Langfuse свежие (меньше 10 мин);
+  - различать аккаунты ai-usage не умеет, поэтому его данные приклеиваются к аккаунту, которым
+    pi пользовался последним.
+- **Частота опроса ai-usage:** для провайдера, которого покрывает Langfuse, раз в 10 мин; иначе
+  и при ошибке Langfuse — раз в 2 мин.
+- **Shared state** (`limits.lf`) пишется только при изменении значений, чтобы не перерисовывать
+  окно каждые 10 с. Курсор живёт в памяти модуля.
+
+## 4. Отображение
+
+- **Одна строка на аккаунт.** Если у провайдера один аккаунт, ключ строки — id провайдера, так
+  что раскрытые и закреплённые строки сохраняются. Если аккаунтов несколько, ключ —
+  `<provider>:<account>`, и рядом с именем показывается метка аккаунта (часть email до `@`).
+- **Статус-бар:** клик по провайдеру открывает графики, правый клик — настройки.
+- **Сайдбар:** у раскрытой строки есть иконка графика.
+- **Клавиша:** `limits.chart` открывает графики провайдера агента в фокусе. Для pi провайдер
+  берётся из метки `agent.provider` от `@wierdbytes/pi-herdr`.
+- **Диалог с графиками:** по одному графику на лимит.
+  - *Window* — текущее окно в виде ступенчатой области (внутри окна расход только растёт).
+    Диагональ ровного темпа идёт от 0% в начале окна до 100% в момент сброса, отметка показывает
+    «сейчас». Данные: `v2/metrics`, `max(value)` по минутам для 5h и по часам для 7d.
+  - *History* — столбики максимума: за 7 дней по часам для 5h и за 28 дней для 7d.
+  - Лимиты, которые известны только из ai-usage, графика не имеют.
+
+## 5. Langfuse: что важно знать
+
+- Сервер 4.75 работает в режиме v4 `events_only`:
+  - `GET /scores`, `/v2/scores`, `/observations`, `/traces` и `/metrics` v1 отвечают 404;
+  - работают `GET /v3/scores`, `/v2/observations`, `/v2/metrics` и запись `score-create`.
+- Ключи привязаны к проекту, режима «только чтение» нет. Мод читает ключ, который уже лежит на
+  диске. Моды herdr — доверенный код, и доступ к файлам у них и так есть.
+- У `v2/metrics` нет агрегата «последнее значение» и нет группировки по metadata.
+  `row_limit` — до 1000 строк, пустые интервалы дополняются строками с `name: ""`.
+- Скоры, привязанные к trace, удаляются вместе с ним.
+
+## 6. Проверка
+
+```sh
+# pi-langfuse
+(cd ../pi-langfuse && npm test)
+# мод
+bun test && scripts/install-mod.sh && herdr-app status
+# живые данные
+herdr-app do limits.chart        # диалог для провайдера в фокусе
+herdr-app do limits.refresh
+```
