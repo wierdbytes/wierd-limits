@@ -15,24 +15,31 @@ const HOUR = 3600, DAY = 86400;
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-// What to ask Langfuse for: the window [start, reset) by the minute (by the hour for long
-// windows); the last week (a short window) / four weeks (a weekly one) by the hour; or the
-// last 90 days by the (UTC) day, the highest reading of each.
+// What to ask Langfuse for. `kind` says what it shows:
+//   window    the current window [start, reset) by the minute (by the hour for long windows)
+//   previous  the window that just ended, while the next one hasn't started (no reset yet)
+//   none      no window known at all: nothing to ask
+//   history   the last week (a short window) / four weeks (a weekly one) by the hour
+//   90d       the last 90 days by the (UTC) day
+// The window kinds never fall back to history: that is its own tab.
 export function chartRange(l, range, now) {
-  const short = (l.window ?? DAY * 7) <= 6 * HOUR;
+  const length = l.window ?? l.last_window ?? null;
+  const short = (length ?? DAY * 7) <= 6 * HOUR;
   if (range === "90d") {
     const to = Math.ceil(now / DAY) * DAY;
-    return { from: to - 90 * DAY, to, until: now, granularity: "day", bars: 90 };
+    return { kind: "90d", from: to - 90 * DAY, to, until: now, granularity: "day", bars: 90 };
   }
-  if (range === "window" && l.reset_at != null && l.window) {
-    const from = l.reset_at - l.window;
-    return { from, to: l.reset_at, until: Math.min(now, l.reset_at), granularity: short ? "minute" : "hour" };
+  if (range === "window") {
+    const running = l.reset_at != null && l.reset_at > now;
+    const end = running ? l.reset_at : l.reset_at ?? l.last_reset_at ?? null;
+    if (end == null || !length) return { kind: "none", from: now, to: now + (length ?? 5 * HOUR), until: now, granularity: "minute" };
+    return { kind: running ? "window" : "previous", from: end - length, to: end, until: Math.min(now, end), granularity: short ? "minute" : "hour" };
   }
   // Buckets on whole local hours (a short window) or quarter days (a weekly one).
   const days = short ? 7 : 28, size = (short ? 1 : 6) * HOUR;
   const tz = new Date(now * 1000).getTimezoneOffset() * 60;
   const to = Math.ceil((now - tz) / size) * size + tz;
-  return { from: to - days * DAY, to, until: now, granularity: "hour", bars: (days * DAY) / size };
+  return { kind: "history", from: to - days * DAY, to, until: now, granularity: "hour", bars: (days * DAY) / size };
 }
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -188,7 +195,7 @@ export function windowChart(l, points, r, now, t, color, hover) {
   const pts = points.filter(p => p.t >= r.from - 60 && p.t <= r.to).map(p => ({ ...p }));
   // The latest value known (it may come from ai-usage) closes the series at now.
   // The latest value known (from Langfuse or ai-usage) is a reading too, at the time it was read.
-  if (l.utilization != null && r.until > r.from) {
+  if (r.kind === "window" && l.utilization != null && r.until > r.from) {
     const last = pts.at(-1), at = clamp(l.at ?? r.until, r.from, r.until);
     if (!last || l.utilization > last.v || (l.utilization === last.v && at > last.t)) {
       pts.push({ t: Math.max(at, last?.t ?? at), v: Math.max(l.utilization, last?.v ?? 0) });
@@ -256,6 +263,10 @@ export function windowChart(l, points, r, now, t, color, hover) {
     root.child(div().absolute().left(pct(nx)).top(pct(ly)).ml(-6).mt(-6).size(12).rounded_full().bg(alpha(color, 0.25)))
       .child(div().absolute().left(pct(nx)).top(pct(ly)).ml(-3.5).mt(-3.5).size(7).rounded_full().bg(color).border(1.5).border_color(t.popover));
   }
+  if (r.kind === "previous") {
+    root.child(div().absolute().left(6).top(5).px(5).py(1).rounded(4).bg(alpha(t.popover, 0.85)).text_size(10).text_color(t.dim)
+      .child(`previous window · ended ${span > DAY ? dayHm(r.to) : hm(r.to)}`));
+  }
   if (hover?.ts != null && hover.ts >= r.from && hover.ts <= r.to) {
     const time = ts => (span > DAY ? dayHm(ts) : hm(ts));
     const known = pts.filter(p => p.t <= hover.ts).at(-1), next = pts.find(p => p.t > hover.ts);
@@ -266,10 +277,9 @@ export function windowChart(l, points, r, now, t, color, hover) {
     } else if (!known) {
       lines = [[time(hover.ts), t.dim], ["no readings yet", t.dim]];
     } else {
-      // The value is the last reading at or before the pointer; say when it was read if that
-      // was a while ago, and what came next across a stretch without readings.
+      // The value is the last reading at or before the pointer; across a stretch without
+      // readings, what came next.
       lines = [[time(hover.ts), t.dim], [`${Math.round(known.v * 10) / 10}%`, color]];
-      if (hover.ts - known.t > 120) lines.push([`read ${time(known.t)}`, t.dim]);
       if (next && next.t - known.t > gap) lines.push([`then ${Math.round(next.v * 10) / 10}% at ${time(next.t)}`, t.dim]);
     }
     cursor(root, X(hover.ts), lines, t);

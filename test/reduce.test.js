@@ -108,3 +108,21 @@ test("mergeData without a poll is the Langfuse data", () => {
   const d = { provider: "claude", models: [] };
   expect(mergeData(d, null, 0)).toBe(d);
 });
+
+describe("a window that hasn't started", () => {
+  test("replaces an ended window and remembers it", () => {
+    const ended = { utilization: 78, reset_at: 1000, window: 18000, at: 990 };
+    const open = { utilization: 0, reset_at: null, at: 1100 };
+    expect(foldWindow(ended, open)).toEqual({ utilization: 0, reset_at: null, at: 1100, last_reset_at: 1000, last_window: 18000 });
+    expect(foldWindow(open, ended)).toEqual({ utilization: 0, reset_at: null, at: 1100, last_reset_at: 1000, last_window: 18000 });
+  });
+  test("does not replace a window still running when it was read", () => {
+    const running = { utilization: 40, reset_at: 2000, window: 18000, at: 900 };
+    expect(foldWindow(running, { utilization: 0, reset_at: null, at: 1100 })).toBe(running);
+  });
+  test("ai-usage's empty window joins pi's ended one in a row", () => {
+    const lf = applyScores(null, [score("rl.claude.a1.5h", 78, 990, md5h(1000))]);
+    const r = rows([{ id: "claude" }], { claude: { provider: "claude", five_hour: { utilization: 0, reset_at: null }, updated_at: 1100 } }, lf, 1200);
+    expect(r[0].d.five_hour).toMatchObject({ utilization: 0, reset_at: null, last_reset_at: 1000, last_window: 18000 });
+  });
+});

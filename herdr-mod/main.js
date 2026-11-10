@@ -365,6 +365,7 @@ function aboveBar(bar, x) {
 const CHART_W = 620, CHART_PAD = 16, CHART_GAP = 16, CHART_HEAD = 26;
 const CHART_TITLE = 22, CHART_ROW = CHART_TITLE + 8 + CHART_H + 4 + 14, POLLED_ROW = CHART_TITLE + 8 + 6;
 const charted = (row, l) => Boolean(l.sid && row.series?.[l.sid]);
+const chartKey = (name, r) => `${name}:${r.kind}:${r.from}`;
 function openChart(key) {
   const row = findRow(key);
   if (!row) return;
@@ -389,8 +390,11 @@ export default class Limits extends View {
     if (p.chart) {
       this.range = "window";
       this.charts = {};
+      this.lastKey = {};
       this.loadCharts(cx);
       cx.timer.every(TICK, cx => { this.loadCharts(cx); cx.notify(); });
+      // A reset or new data can change what a chart shows between ticks.
+      cx.timer.every(LF_CHECK, cx => this.loadCharts(cx, { missing: true }));
       return;
     }
     // Overlay ids left from before a restart name nothing.
@@ -591,24 +595,32 @@ export default class Limits extends View {
   // ---- charts -----------------------------------------------------------------------------------
 
   // Asks Langfuse for every charted limit's series in the current range. Results land in
-  // this.charts by limit and range; a request already made stays until the next tick.
-  loadCharts(cx) {
+  // this.charts by series, range kind and start, so a window that resets (or a history that
+  // moves on an hour) asks again instead of drawing what it had under the new title.
+  // `missing`: only what isn't there yet.
+  loadCharts(cx, { missing = false } = {}) {
     const row = findRow(props()?.chart), now = nowS();
     if (!row?.series) return;
-    const range = this.range;
+    const wanted = limits(row.d).filter(l => charted(row, l)).map(l => {
+      const name = row.series[l.sid], r = chartRange(l, this.range, now);
+      return { name, r, key: chartKey(name, r) };
+    }).filter(w => w.r.kind !== "none" && !(missing && (this.charts[w.key] || this.loading?.has(w.key))));
+    if (!wanted.length) return;
+    this.loading ??= new Set();
+    for (const w of wanted) this.loading.add(w.key);
     cx.spawn(async cx => {
       const client = await lfClient();
-      if (!client) return;
-      await Promise.all(limits(row.d).map(async l => {
-        const name = l.sid && row.series[l.sid];
-        if (!name) return;
-        const r = chartRange(l, range, now), key = `${name}:${range}`;
+      await Promise.all(wanted.map(async ({ name, r, key }) => {
         try {
+          if (!client) throw new Error("no Langfuse keys");
           const data = await client.series([name], r.from * 1000, (r.until + 60) * 1000, r.granularity);
           this.charts[key] = { r, points: seriesPoints(data, name) };
         } catch (e) {
           this.charts[key] = { r, error: String(e?.message ?? e) };
+        } finally {
+          this.loading.delete(key);
         }
+        this.lastKey[`${name}:${r.kind}`] = key;
       }));
       cx.notify();
     });
@@ -677,10 +689,14 @@ export default class Limits extends View {
       side.push(div().text_size(10.5).text_color(t.dim).child("polled, no history"));
       return v_flex().gap(8).child(this.chartTitle(l, now, t, tn, side)).child(polledBar(reset ? 0 : l.utilization, reset ? null : elapsed(l, now), t, tn.color));
     }
-    const c = this.charts[`${name}:${this.range}`];
-    const r = c?.r ?? chartRange(l, this.range, now);
+    const fresh = chartRange(l, this.range, now);
+    // The data for this range, else what this series last showed of the same kind (a history
+    // whose hour moved on) while the new one loads.
+    const c = this.charts[chartKey(name, fresh)] ?? this.charts[this.lastKey[`${name}:${fresh.kind}`]];
+    const r = c?.r ?? fresh;
     const inWindow = r.bars == null;
-    const chart = !c ? emptyChart("Loading…", t)
+    const chart = fresh.kind === "none" ? emptyChart("The window starts with the next request", t)
+      : !c ? emptyChart("Loading…", t)
       : c.error ? emptyChart(c.error, t)
       : inWindow ? windowChart(l, c.points, r, now, t, tn.color, this.hoverOf(name))
       : c.points.length ? historyChart(c.points, r, now, t, t.accent, this.hoverOf(name)) : emptyChart("No readings in this range yet", t);
@@ -692,7 +708,7 @@ export default class Limits extends View {
       .child(div().h(8))
       .child(chart)
       .child(div().h(4))
-      .child(axis(r, left, right, t));
+      .child(fresh.kind === "none" ? div().h(14) : axis(r, left, right, t));
   }
 
   // ---- popup ------------------------------------------------------------------------------------

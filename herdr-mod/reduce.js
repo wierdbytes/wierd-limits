@@ -43,11 +43,20 @@ export function readingOf(score) {
   };
 }
 
-// Folds reading `b` into window `a` (either may be null). See the rules above.
+// Folds reading `b` into window `a` (either may be null). See the rules above. A reading
+// without a reset is a window that hasn't started (Anthropic: 0% and no reset until the next
+// request): it replaces a window that had ended by the time it was read, which is kept as
+// `last_reset_at` / `last_window` so the chart can still show it.
 export function foldWindow(a, b) {
   if (!a) return b;
   if (!b) return a;
   const newer = (b.at ?? 0) >= (a.at ?? 0) ? b : a;
+  if ((a.reset_at == null) !== (b.reset_at == null)) {
+    const timed = a.reset_at != null ? a : b, open = timed === a ? b : a;
+    if ((open.at ?? 0) < timed.reset_at) return timed;
+    const last = Math.max(timed.reset_at, open.last_reset_at ?? 0);
+    return { ...open, last_reset_at: last, last_window: last === timed.reset_at ? timed.window ?? open.last_window : open.last_window };
+  }
   if (a.reset_at != null && b.reset_at != null) {
     if (b.reset_at > a.reset_at + SAME_WINDOW) return b;
     if (b.reset_at < a.reset_at - SAME_WINDOW) return a;
@@ -91,7 +100,7 @@ const MAIN = { "5h": "five_hour", "7d": "seven_day" };
 // An account in the shape ai-usage prints: five_hour, seven_day, models[], plan, updated_at.
 export function accountData(acc) {
   const out = { provider: acc.provider, five_hour: null, seven_day: null, models: [], plan: acc.plan, updated_at: acc.at || null, source: "langfuse" };
-  const win = l => ({ utilization: l.utilization, reset_at: l.reset_at, at: l.at, window: l.window });
+  const win = l => ({ utilization: l.utilization, reset_at: l.reset_at, at: l.at, window: l.window, last_reset_at: l.last_reset_at, last_window: l.last_window });
   for (const l of Object.values(acc.limits ?? {})) {
     if (MAIN[l.id]) out[MAIN[l.id]] = win(l);
     else out.models.push({ ...win(l), label: l.label ?? l.id, series: l.id });
