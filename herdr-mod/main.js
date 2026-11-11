@@ -17,10 +17,12 @@
 //   {}               the status bar: per account its icon, plan badge, headline limit with
 //                    pace chevrons, and when it resets. Click: the account's charts;
 //                    right-click: the settings popup, just above the bar.
-//   { sidebar: id }  rows above the sidebar's footer (block `id`, resized to fit). A click
-//                    opens a row: every limit as a 3px bar with a tick where the window's time
-//                    stands; usage past the tick is drawn thicker. A click on a limit pins it
-//                    as the row's headline (again: unpins). An open row's chart icon: its charts.
+//   { sidebar: id }  rows above the sidebar's footer (block `id`, resized to fit). A closed
+//                    row shows its headline like an open row shows a limit. A click opens a
+//                    row: every limit as a 3px bar with a tick where the window's time stands,
+//                    its percent and countdown; usage past the tick is drawn thicker. A click
+//                    on a limit pins it as the row's headline (again: unpins). An open row's
+//                    chart icon: its charts.
 //   { menu: true }   the popup: refresh, where the data comes from, and where each provider
 //                    shows: sidebar, both, status bar or nowhere (shared "limits.where";
 //                    nowhere isn't polled).
@@ -55,9 +57,13 @@ const LF = "limits.lf", LF_ERROR = "limits.lfError", POLLED_BY = "limits.polledA
 const MENU = "limits.menu", MENU_CLOSED = "limits.menuClosedAt", CHART = "limits.chart";
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // Sidebar sizes (px at zoom 1); height() must match what rows() draws.
-const ROW = 28, LIM = 20, LIM_STACKED = 30, EXTRA = 20, ERR = 18, PAD = 9;
-// An inline bar needs this much room; narrower sidebars put the bar under its numbers.
-const INLINE_MIN = 90 + 28 + 52 + 42 + 46 + 18;
+const ROW = 28, ROW_STACKED = 36, LIM = 20, LIM_STACKED = 30, EXTRA = 20, ERR = 18, PAD = 9;
+// A row head's chevron column (8 + gap 6): an open row's limits keep clear of it, so their
+// numbers and bars end where a closed row's do.
+const TAIL = 14;
+// An inline bar needs this much room; narrower sidebars put the bar under its numbers (a
+// closed row's too: ROW_STACKED).
+const INLINE_MIN = 90 + 28 + 52 + 42 + 46 + 18 + TAIL;
 // The terminal's face, as the agents panel uses for its numbers: percents and countdowns line up.
 const mono = () => settings().font_family ?? "JetBrains Mono";
 
@@ -299,6 +305,17 @@ function bar(w, now, t) {
     .when(tick !== null, el => el.child(div().absolute().top(-3).h(9).w(1).bg(t.foreground).opacity(0.5).left(`${tick}%`)));
 }
 
+// A limit's percent with its pace chevrons, and its countdown. The sidebar gives them fixed
+// widths (42, 46), so closed and open rows line up.
+function pctCell(w, now, t) {
+  const reset = isReset(w, now), tn = tone(w, now, t);
+  return h_flex().flex_none().gap(2).justify_end().items_center()
+    .when(tn.speed > 0, el => el.child(div().font_semibold().text_color(tn.color).child(chevrons(tn.speed))))
+    .child(div().font_family(mono()).text_color(tn.color).child(reset ? "–" : pctText(w.utilization)));
+}
+const resetCell = (w, now, t) => div().w(46).flex_none().text_right().font_family(mono()).text_size(10.5).text_color(t.dim)
+  .child(!isReset(w, now) && w.reset_at != null ? span(w.reset_at - now) : "");
+
 function find(node, id) {
   if (node?.id === id) return node;
   for (const c of node?.children ?? []) { const f = find(c, id); if (f) return f; }
@@ -488,13 +505,13 @@ export default class Limits extends View {
     return { ls, ex: extras(d, false), err: Boolean(d?.error) };
   }
 
-  height(rows, narrow, open, now, lim) {
+  height(rows, narrow, open, now, stacked) {
     if (!rows.length) return this.none ? 0 : ROW + PAD;
     if (narrow) return rows.length * ROW + PAD;
     return PAD + rows.reduce((h, r) => {
-      if (!open.includes(r.key) || !r.d) return h + ROW;
+      if (!open.includes(r.key) || !r.d) return h + (stacked && limits(r.d).length ? ROW_STACKED : ROW);
       const b = this.body(r.d, now);
-      return h + ROW + Math.max(1, b.ls.length) * lim + b.ex.length * EXTRA + (b.err ? ERR : 0) + 4;
+      return h + ROW + Math.max(1, b.ls.length) * (stacked ? LIM_STACKED : LIM) + b.ex.length * EXTRA + (b.err ? ERR : 0) + 4;
     }, 0);
   }
 
@@ -507,7 +524,7 @@ export default class Limits extends View {
     const narrow = narrowSidebar(), open = shared(OPEN) ?? [], pinned = shared(PINNED) ?? {};
     const stacked = (this.width ?? 0) < INLINE_MIN;
     this.none = none;
-    const h = this.height(rows, narrow, open, now, stacked ? LIM_STACKED : LIM);
+    const h = this.height(rows, narrow, open, now, stacked);
     if (h !== this.h && typeof block === "string") { this.h = h; run("layout.resize", { id: block, px: h }); }
 
     const root = v_flex().id("limits-side").w_full().pt(4).pb(4).px(narrow ? 4 : 10).border_t(1).border_color(t.border)
@@ -521,33 +538,31 @@ export default class Limits extends View {
 
     return root.children(rows.map(r => {
       const d = r.d, top = headline(r, now), isOpen = !narrow && open.includes(r.key);
-      const reset = top && isReset(top, now), tn = top && tone(top, now, t);
-      const pct = top && h_flex().flex_none().gap(2).items_center().justify_end()
-        .when(tn.speed > 0, el => el.child(div().text_color(tn.color).font_semibold().child(chevrons(tn.speed))))
-        .child(div().min_w(narrow ? 0 : 32).text_right().font_family(mono()).text_color(tn.color).child(reset ? "–" : pctText(top.utilization)));
 
       if (narrow) return h_flex().id(`side-${r.key}`).h(ROW).gap(4).items_center().justify_center().rounded(6)
-        .child(icon(r.p.id, 12)).when(Boolean(pct), el => el.child(pct.text_size(10.5)));
+        .child(icon(r.p.id, 12)).when(Boolean(top), el => el.child(pctCell(top, now, t).text_size(10.5)));
 
-      const head = h_flex().id(`side-${r.key}`).h(ROW).px(4).gap(6).items_center().rounded(6).cursor_pointer()
-        .hover(s => s.bg(t.hover))
-        .on_click(() => setOpen(r.key, !isOpen))
+      // A closed row reads like an open row's limit: the headline's bar, percent and countdown;
+      // a narrow sidebar puts the bar under them.
+      const closed = !isOpen && Boolean(top), under = closed && stacked;
+      const line = h_flex().h(under ? 18 : ROW).gap(6).items_center()
         .child(h_flex().min_w(0).flex_shrink(1).gap(6).items_center().overflow_hidden()
           .child(icon(r.p.id, 13))
           .child(div().min_w(0).truncate().text_color(t.muted).child(r.multi ? `${r.p.name} · ${accountName(r)}` : r.p.name))
           .when(Boolean(d.plan), el => el.child(badge(planName(r.p.id, d.plan), t))))
-        // The countdown gives way first when the sidebar is narrow; the % and arrow stay put.
-        .child(h_flex().flex_1().min_w(0).justify_end().overflow_hidden()
-          .when(Boolean(top) && !isOpen && top.reset_at != null && !reset, el => el
-            .child(div().min_w(0).truncate().font_family(mono()).text_size(10.5).text_color(t.dim).child(span(top.reset_at - now)))))
+        .child(closed && !under ? bar(top, now, t).ml(4) : div().flex_1())
         .when(Boolean(d.error) && !isOpen, el => el.child(div().flex_none().text_size(11).font_semibold().text_color(top ? t.working : t.blocked).child("!")))
-        .when(Boolean(pct) && !isOpen, el => el.child(pct))
+        .when(closed, el => el.child(pctCell(top, now, t).w(42)).child(resetCell(top, now, t)))
         .when(!top && !isOpen, el => el.child(div().text_color(t.dim).child("--")))
         .when(isOpen && limits(d).length > 0, el => el.child(div().id(`chart-${r.key}`).flex_none().p(3).rounded(4).cursor_pointer()
           .text_color(t.dim).hover(s => s.bg(t.raised).text_color(t.foreground)).tooltip("Charts")
           .on_click((_e, cx) => { cx.stop_propagation(); openChart(r.key); })
           .child(svg("mods/limits/chart.svg").size(11))))
         .child(svg(`mods/workspace-chrome/chevron-${isOpen ? "down" : "right"}.svg`).size(8).flex_none().text_color(t.dim));
+      const head = (under ? v_flex().h(ROW_STACKED).justify_center().gap(3).child(line).child(h_flex().h(9).pr(TAIL).items_center().child(bar(top, now, t))) : line)
+        .id(`side-${r.key}`).px(4).rounded(6).cursor_pointer()
+        .hover(s => s.bg(t.hover))
+        .on_click(() => setOpen(r.key, !isOpen));
 
       const b = isOpen ? this.body(d, now) : null;
       return v_flex().w_full()
@@ -565,21 +580,16 @@ export default class Limits extends View {
   }
 
   limitRow(r, w, now, t, isPinned, isTop, stacked) {
-    const reset = isReset(w, now), tn = tone(w, now, t);
     const label = div().flex_none().truncate().text_color(isPinned ? t.accent : isTop ? t.foreground : t.muted)
       .when(isTop, el => el.font_semibold()).child(w.label);
-    const pct = h_flex().w(42).flex_none().gap(2).justify_end().items_center()
-      .when(tn.speed > 0, el => el.child(div().font_semibold().text_color(tn.color).child(chevrons(tn.speed))))
-      .child(div().font_family(mono()).text_color(tn.color).child(reset ? "–" : pctText(w.utilization)));
-    const resets = div().w(46).flex_none().text_right().font_family(mono()).text_size(10.5).text_color(t.dim)
-      .child(!reset && w.reset_at != null ? span(w.reset_at - now) : "");
+    const pct = pctCell(w, now, t).w(42), resets = resetCell(w, now, t);
     const line = stacked
       ? v_flex().h(LIM_STACKED).justify_center().gap(4)
         .child(h_flex().items_center().gap(6).child(label.flex_1().min_w(0)).child(pct).child(resets))
         .child(h_flex().h(9).items_center().child(bar(w, now, t)))
       : h_flex().h(LIM).items_center().gap(6).child(label.w(52)).child(bar(w, now, t)).child(pct).child(resets);
     return v_flex()
-      .child(line.id(`limit-${r.key}-${w.label}`).text_size(11.5).rounded(4).cursor_pointer()
+      .child(line.id(`limit-${r.key}-${w.label}`).pr(TAIL).text_size(11.5).rounded(4).cursor_pointer()
         .hover(s => s.bg(t.hover))
         .on_click(() => {
           const cur = { ...(shared(PINNED) ?? {}) };
